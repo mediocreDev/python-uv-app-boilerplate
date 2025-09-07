@@ -1,0 +1,24 @@
+repos:
+  - repo: local
+    hooks:
+      # Ruff lint
+      - id: ruff-check
+        name: Ruff Lint
+        entry: uv run ruff check
+        language: system
+        types: [python]
+
+      # Ruff format
+      - id: ruff-format
+        name: Ruff Format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      # Run pytest before push
+      - id: pytest-on-push
+        name: Run pytest before push
+        entry: uv run pytest
+        language: system
+        types: [python]
+        stages: [pre-push]
