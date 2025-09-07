@@ -6,27 +6,134 @@ on:
   pull_request:
     branches: [master, dev]
 
+permissions:
+  contents: read
+  packages: write
+
+env:
+  APP_NAME: boilerplate
+  KEEP_BUILDS: 5
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-extras --dev
+      - run: make lint
+      - run: make test
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+  docker-build-push-clean:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.event_name == 'push'
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Sync dependencies
-        run: uv sync --all-extras --dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Run linting with ruff
-        run: make lint
+      - name: Install GitHub CLI
+        run: sudo apt-get install -y gh jq
 
-      - name: Run tests with pytest
-        run: make test
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ env.GH_TOKEN }}
+
+      - name: Set BUILD_ENV, tags, lowercase owner/repo, and API base
+        run: |
+          # Decide build environment based on branch
+          if [ "${{ github.ref_name }}" = "master" ]; then
+            IMAGE_TAG=prod
+            BUILD_ENV=prod
+          else
+            IMAGE_TAG=dev
+            BUILD_ENV=dev
+          fi
+
+          # Generate short SHA safely
+          SHA_SHORT=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          SHA_TAG="${IMAGE_TAG}-${SHA_SHORT}"
+
+          # Export for later steps
+          echo "BUILD_ENV=$BUILD_ENV" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "SHA_TAG=$SHA_TAG" >> $GITHUB_ENV
+
+          # Lowercase owner and repo
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO_LC=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LC=$OWNER_LC" >> $GITHUB_ENV
+          echo "REPO_LC=$REPO_LC" >> $GITHUB_ENV
+
+          # Detect if owner is User or Org
+          TYPE=$(gh api /users/$OWNER_LC --jq '.type')
+          if [ "$TYPE" = "User" ]; then
+            API_BASE="/users/$OWNER_LC"
+          else
+            API_BASE="/orgs/$OWNER_LC"
+          fi
+          echo "API_BASE=$API_BASE" >> $GITHUB_ENV
+
+      - name: Build image
+        run: |
+          docker build \
+            --target $BUILD_ENV \
+            -t ghcr.io/$OWNER_LC/$REPO_LC/$APP_NAME:$IMAGE_TAG \
+            -t ghcr.io/$OWNER_LC/$REPO_LC/$APP_NAME:$SHA_TAG \
+            .
+
+      - name: Push image
+        run: |
+          docker push ghcr.io/$OWNER_LC/$REPO_LC/$APP_NAME:$IMAGE_TAG
+          docker push ghcr.io/$OWNER_LC/$REPO_LC/$APP_NAME:$SHA_TAG
+
+      - name: Delete & verify rolling tag (dev/prod)
+        run: |
+          VERSION_ID=$(gh api \
+            $API_BASE/packages/container/$REPO_LC%2F$APP_NAME/versions \
+            --jq '[.[] | select(.metadata.container.tags[] == env.IMAGE_TAG)][0].id')
+
+          COUNT=$(gh api \
+            $API_BASE/packages/container/$REPO_LC%2F$APP_NAME/versions \
+            --jq '[.[] | select(.metadata.container.tags[] == env.IMAGE_TAG)] | length')
+
+          if [ -z "$VERSION_ID" ]; then
+            echo "⚠️ No rolling tag $IMAGE_TAG found"
+          elif [ "$COUNT" -gt 1 ]; then
+            gh api --method DELETE \
+              $API_BASE/packages/container/$REPO_LC%2F$APP_NAME/versions/$VERSION_ID
+            echo "✅ Deleted rolling tag $IMAGE_TAG (remaining count: $(($COUNT-1)))"
+          else
+            echo "ℹ️ Skipping delete — $IMAGE_TAG is the last version (count=$COUNT)"
+          fi
+
+      - name: Prune old SHA-tagged images (keep last $KEEP_BUILDS)
+        run: |
+          VERSION_IDS=$(gh api $API_BASE/packages/container/$REPO_LC%2F$APP_NAME/versions \
+            --jq '[.[] 
+              | select(.metadata.container.tags[] | startswith(env.IMAGE_TAG+"-")) 
+              | {id, created_at} ] 
+              | sort_by(.created_at) 
+              | .[].id')
+
+          COUNT=$(echo "$VERSION_IDS" | wc -l | xargs)
+          echo "Found $COUNT SHA-tagged versions for $IMAGE_TAG"
+
+          if [ "$COUNT" -gt "$KEEP_BUILDS" ]; then
+            DELETE_IDS=$(echo "$VERSION_IDS" | head -n -$KEEP_BUILDS)
+            for VID in $DELETE_IDS; do
+              gh api --method DELETE $API_BASE/packages/container/$REPO_LC%2F$APP_NAME/versions/$VID
+              echo "🗑️ Deleted old SHA-tag version id $VID"
+            done
+          else
+            echo "✅ Nothing to prune (<= $KEEP_BUILDS builds)"
+          fi

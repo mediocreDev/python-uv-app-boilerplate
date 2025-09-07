@@ -1,0 +1,10 @@
+services:
+  app:
+    build:
+      target: dev
+    image: ${APP_NAME:-boilerplate}:dev
+    volumes:
+      - ./src:/app/src:cached
+    environment:
+      APP_ENV: development
+      APP_DEBUG: "true"

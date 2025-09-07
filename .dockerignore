@@ -1,0 +1,37 @@
+# Ignore Git metadata
+.git
+.gitignore
+
+# Python cache & venvs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+.venv/
+.uv/
+.pytest_cache/
+.mypy_cache/
+ruff_cache/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+*.tmp
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Docker-related
+docker-compose.override.yml
+.env

@@ -1,0 +1,14 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ${BUILD_ENV:-prod}
+    image: ${APP_NAME:-boilerplate}:${BUILD_ENV:-prod}
+    container_name: myapp
+    ports:
+      - "6969:6969"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${BUILD_ENV:-prod}
